@@ -1,0 +1,10 @@
+﻿  main.c
+C:\Users\User\source\repos\enumerator\main.c(29,16): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\User\source\repos\enumerator\main.c(30,16): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\User\source\repos\enumerator\main.c(123,59): warning C4047: 'function': 'DWORD' differs in levels of indirection from 'void *'
+C:\Users\User\source\repos\enumerator\main.c(123,59): warning C4024: 'CreateToolhelp32Snapshot': different types for formal and actual parameter 2
+  Generating code
+  Previous IPDB not found, fall back to full compilation.
+  All 13 functions were compiled because no usable IPDB/IOBJ from previous compilation was found.
+  Finished generating code
+  enumerator.vcxproj -> C:\Users\User\source\repos\enumerator\x64\Release\main.exe

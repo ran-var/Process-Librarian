@@ -1,0 +1,6 @@
+﻿  main.c
+C:\Users\User\source\repos\enumerator\main.c(29,16): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\User\source\repos\enumerator\main.c(30,16): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\User\source\repos\enumerator\main.c(123,59): warning C4047: 'function': 'DWORD' differs in levels of indirection from 'void *'
+C:\Users\User\source\repos\enumerator\main.c(123,59): warning C4024: 'CreateToolhelp32Snapshot': different types for formal and actual parameter 2
+  enumerator.vcxproj -> C:\Users\User\source\repos\enumerator\x64\Debug\main.exe
