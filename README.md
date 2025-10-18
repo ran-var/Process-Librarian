@@ -23,6 +23,9 @@ usage: `main.exe [options] <argument>`
 
 options:
   -i, --inspect <process_name>    inspect process and display information
+  -m, --modules <process_name>    list loaded modules (dlls)
+  -t, --threads <process_name>    list all threads
+  -l, --list                      list all running processes
   -h, --help                      display this help message
 
 examples:
