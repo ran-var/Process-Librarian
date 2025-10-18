@@ -1,9 +1,0 @@
-﻿  main.c
-C:\Users\User\source\repos\enumerator\main.c(92,25): warning C4018: '<': signed/unsigned mismatch
-C:\Users\User\source\repos\enumerator\main.c(94,25): warning C4018: '<': signed/unsigned mismatch
-  Generating code
-  13 of 20 functions (65.0%) were compiled, the rest were copied from previous compilation.
-    6 functions were new in current compilation
-    0 functions had inline decision re-evaluated but remain unchanged
-  Finished generating code
-  enumerator.vcxproj -> C:\Users\User\source\repos\enumerator\x64\Release\main.exe

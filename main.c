@@ -3,6 +3,27 @@
 #include <tlhelp32.h>
 #include <psapi.h>
 
+typedef struct {
+    WCHAR name[MAX_PATH];
+    int distance;
+} ProcessSuggestion;
+
+typedef struct {
+    DWORD pid;
+    DWORD parentPid;
+    DWORD threadCount;
+    LONG basePriority;
+    WCHAR name[MAX_PATH];
+    WCHAR parentName[MAX_PATH];
+} ProcessInfo;
+
+typedef struct {
+    DWORD tid;
+    DWORD ownerPid;
+    LONG basePriority;
+    LONG deltaPriority;
+} ThreadInfo;
+
 void PrintBanner() {
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD dwMode = 0;
@@ -28,10 +49,15 @@ void PrintHelp(LPWSTR progName) {
     wprintf(L"\nusage: %s [options] <argument>\n\n", progName);
     wprintf(L"options:\n");
     wprintf(L"  -i, --inspect <process_name>    inspect process and display information\n");
+    wprintf(L"  -m, --modules <process_name>    list loaded modules (dlls)\n");
+    wprintf(L"  -t, --threads <process_name>    list all threads\n");
+    wprintf(L"  -l, --list                      list all running processes\n");
     wprintf(L"  -h, --help                      display this help message\n\n");
     wprintf(L"examples:\n");
     wprintf(L"  %s -i notepad.exe\n", progName);
-    wprintf(L"  %s --inspect chrome.exe\n", progName);
+    wprintf(L"  %s -m chrome.exe\n", progName);
+    wprintf(L"  %s -t discord.exe\n", progName);
+    wprintf(L"  %s --list\n\n", progName);
 }
 
 int LevenshteinDistance(LPCWSTR s1, LPCWSTR s2) {
@@ -71,61 +97,141 @@ BOOL ContainsSubstring(LPCWSTR haystack, LPCWSTR needle) {
     return wcsstr(lowerHaystack, lowerNeedle) != NULL;
 }
 
-typedef struct {
-    WCHAR name[MAX_PATH];
-    int distance;
-} ProcessSuggestion;
-
 int CompareSuggestions(const void* a, const void* b) {
     return ((ProcessSuggestion*)a)->distance - ((ProcessSuggestion*)b)->distance;
 }
 
-void FindSimilarProcesses(LPWSTR searchName, ProcessSuggestion* suggestions, int* count, int maxSuggestions) {
-    PROCESSENTRY32 pe32 = { .dwSize = sizeof(PROCESSENTRY32) };
+BOOL GetAllProcessInfo(ProcessInfo** outProcesses, DWORD* outCount) {
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    *count = 0;
-    if (hSnapshot == INVALID_HANDLE_VALUE) return;
+    if (hSnapshot == INVALID_HANDLE_VALUE) return FALSE;
 
+    DWORD count = 0;
+    PROCESSENTRY32 pe32 = { .dwSize = sizeof(PROCESSENTRY32) };
+    if (Process32First(hSnapshot, &pe32)) {
+        do { count++; } while (Process32Next(hSnapshot, &pe32));
+    }
+
+    ProcessInfo* processes = (ProcessInfo*)malloc(count * sizeof(ProcessInfo));
+    if (!processes) {
+        CloseHandle(hSnapshot);
+        return FALSE;
+    }
+
+    DWORD index = 0;
     if (Process32First(hSnapshot, &pe32)) {
         do {
-            BOOL exists = FALSE;
-            for (int i = 0; i < *count; i++) {
-                if (wcscmp(suggestions[i].name, pe32.szExeFile) == 0) { exists = TRUE; break; }
-            }
-            if (!exists) {
-                int distance = LevenshteinDistance(searchName, pe32.szExeFile);
-                BOOL contains = ContainsSubstring(pe32.szExeFile, searchName);
-                if (contains || distance <= 5) {
-                    if (contains) distance -= 3;
-                    wcscpy_s(suggestions[*count].name, MAX_PATH, pe32.szExeFile);
-                    suggestions[*count].distance = distance;
-                    (*count)++;
-                    if (*count >= maxSuggestions) break;
-                }
-            }
+            processes[index].pid = pe32.th32ProcessID;
+            processes[index].parentPid = pe32.th32ParentProcessID;
+            processes[index].threadCount = pe32.cntThreads;
+            processes[index].basePriority = pe32.pcPriClassBase;
+            wcscpy_s(processes[index].name, MAX_PATH, pe32.szExeFile);
+            processes[index].parentName[0] = L'\0';
+            index++;
         } while (Process32Next(hSnapshot, &pe32));
     }
 
     CloseHandle(hSnapshot);
+
+    for (DWORD i = 0; i < count; i++) {
+        for (DWORD j = 0; j < count; j++) {
+            if (processes[i].parentPid == processes[j].pid) {
+                wcscpy_s(processes[i].parentName, MAX_PATH, processes[j].name);
+                break;
+            }
+        }
+        if (processes[i].parentName[0] == L'\0') {
+            wcscpy_s(processes[i].parentName, MAX_PATH, L"unknown");
+        }
+    }
+
+    *outProcesses = processes;
+    *outCount = count;
+    return TRUE;
+}
+
+BOOL GetAllThreadInfo(ThreadInfo** outThreads, DWORD* outCount) {
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) return FALSE;
+
+    DWORD count = 0;
+    THREADENTRY32 te32 = { .dwSize = sizeof(THREADENTRY32) };
+    if (Thread32First(hSnapshot, &te32)) {
+        do { count++; } while (Thread32Next(hSnapshot, &te32));
+    }
+
+    ThreadInfo* threads = (ThreadInfo*)malloc(count * sizeof(ThreadInfo));
+    if (!threads) {
+        CloseHandle(hSnapshot);
+        return FALSE;
+    }
+
+    DWORD index = 0;
+    if (Thread32First(hSnapshot, &te32)) {
+        do {
+            threads[index].tid = te32.th32ThreadID;
+            threads[index].ownerPid = te32.th32OwnerProcessID;
+            threads[index].basePriority = te32.tpBasePri;
+            threads[index].deltaPriority = te32.tpDeltaPri;
+            index++;
+        } while (Thread32Next(hSnapshot, &te32));
+    }
+
+    CloseHandle(hSnapshot);
+    *outThreads = threads;
+    *outCount = count;
+    return TRUE;
+}
+
+ProcessInfo* FindProcessInfo(ProcessInfo* processes, DWORD count, DWORD pid) {
+    for (DWORD i = 0; i < count; i++) {
+        if (processes[i].pid == pid) return &processes[i];
+    }
+    return NULL;
+}
+
+void FindSimilarProcesses(LPWSTR searchName, ProcessSuggestion* suggestions, int* count, int maxSuggestions) {
+    ProcessInfo* allProcesses = NULL;
+    DWORD processCount = 0;
+
+    if (!GetAllProcessInfo(&allProcesses, &processCount)) return;
+
+    *count = 0;
+    for (DWORD i = 0; i < processCount && *count < maxSuggestions; i++) {
+        BOOL exists = FALSE;
+        for (int j = 0; j < *count; j++) {
+            if (wcscmp(suggestions[j].name, allProcesses[i].name) == 0) {
+                exists = TRUE;
+                break;
+            }
+        }
+
+        if (!exists) {
+            int distance = LevenshteinDistance(searchName, allProcesses[i].name);
+            BOOL contains = ContainsSubstring(allProcesses[i].name, searchName);
+
+            if (contains || distance <= 5) {
+                if (contains) distance -= 3;
+                wcscpy_s(suggestions[*count].name, MAX_PATH, allProcesses[i].name);
+                suggestions[*count].distance = distance;
+                (*count)++;
+            }
+        }
+    }
+
+    free(allProcesses);
     qsort(suggestions, *count, sizeof(ProcessSuggestion), CompareSuggestions);
 }
 
 BOOL ProcEnum(LPWSTR szProcessName, DWORD* dwProcId, HANDLE* hProcess) {
-    PROCESSENTRY32 Proc = { .dwSize = sizeof(PROCESSENTRY32) };
-    HANDLE hSnapshot = NULL;
-
     *dwProcId = 0;
     *hProcess = NULL;
 
-    hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) {
-        wprintf(L"create snapshot failed %d\n", GetLastError());
-        goto _EndOfFunction;
-    }
+    ProcessInfo* allProcesses = NULL;
+    DWORD processCount = 0;
 
-    if (!Process32First(hSnapshot, &Proc)) {
-        wprintf(L"process32first failed %d\n", GetLastError());
-        goto _EndOfFunction;
+    if (!GetAllProcessInfo(&allProcesses, &processCount)) {
+        wprintf(L"failed to get process info\n");
+        return FALSE;
     }
 
     WCHAR LowerSearchName[MAX_PATH * 2] = { 0 };
@@ -136,27 +242,122 @@ BOOL ProcEnum(LPWSTR szProcessName, DWORD* dwProcId, HANDLE* hProcess) {
         LowerSearchName[searchLen] = L'\0';
     }
 
-    do {
+    for (DWORD i = 0; i < processCount; i++) {
         WCHAR LowerName[MAX_PATH * 2] = { 0 };
-        DWORD dwSize = lstrlenW(Proc.szExeFile);
+        DWORD dwSize = lstrlenW(allProcesses[i].name);
         if (dwSize < MAX_PATH * 2) {
-            for (DWORD i = 0; i < dwSize; i++)
-                LowerName[i] = (WCHAR)towlower(Proc.szExeFile[i]);
+            for (DWORD j = 0; j < dwSize; j++)
+                LowerName[j] = (WCHAR)towlower(allProcesses[i].name[j]);
             LowerName[dwSize] = L'\0';
         }
 
         if (wcscmp(LowerName, LowerSearchName) == 0) {
-            *dwProcId = Proc.th32ProcessID;
-            *hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, Proc.th32ProcessID);
+            *dwProcId = allProcesses[i].pid;
+            *hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, allProcesses[i].pid);
             break;
         }
-    } while (Process32Next(hSnapshot, &Proc));
+    }
 
-_EndOfFunction:
-    if (hSnapshot != NULL && hSnapshot != INVALID_HANDLE_VALUE)
-        CloseHandle(hSnapshot);
-
+    free(allProcesses);
     return *dwProcId != 0;
+}
+
+void ListModules(LPWSTR processName) {
+    DWORD dwProcId = 0;
+    HANDLE hProcess = NULL;
+
+    if (!ProcEnum(processName, &dwProcId, &hProcess)) {
+        wprintf(L"\nprocess '%s' not found\n\n", processName);
+        return;
+    }
+
+    wprintf(L"\nmodules loaded in %ls (pid: %lu)\n", processName, dwProcId);
+    wprintf(L"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
+
+    HMODULE hMods[1024];
+    DWORD cbNeeded;
+
+    if (EnumProcessModules(hProcess, hMods, sizeof(hMods), &cbNeeded)) {
+        DWORD moduleCount = cbNeeded / sizeof(HMODULE);
+        for (DWORD i = 0; i < moduleCount; i++) {
+            WCHAR szModName[MAX_PATH];
+            if (GetModuleFileNameExW(hProcess, hMods[i], szModName, sizeof(szModName) / sizeof(WCHAR))) {
+                MODULEINFO modInfo;
+                if (GetModuleInformation(hProcess, hMods[i], &modInfo, sizeof(modInfo))) {
+                    wprintf(L"[0x%p] %ls (%lu kb)\n",
+                        modInfo.lpBaseOfDll,
+                        szModName,
+                        modInfo.SizeOfImage / 1024);
+                }
+            }
+        }
+        wprintf(L"\ntotal: %lu modules\n", moduleCount);
+    }
+
+    CloseHandle(hProcess);
+    wprintf(L"\n");
+}
+
+void ListThreads(LPWSTR processName) {
+    DWORD dwProcId = 0;
+    HANDLE hProcess = NULL;
+
+    if (!ProcEnum(processName, &dwProcId, &hProcess)) {
+        wprintf(L"\nprocess '%s' not found\n\n", processName);
+        return;
+    }
+
+    ThreadInfo* allThreads = NULL;
+    DWORD threadCount = 0;
+
+    if (!GetAllThreadInfo(&allThreads, &threadCount)) {
+        wprintf(L"failed to get thread info\n");
+        CloseHandle(hProcess);
+        return;
+    }
+
+    wprintf(L"\nthreads in %ls (pid: %lu)\n", processName, dwProcId);
+    wprintf(L"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
+
+    DWORD count = 0;
+    for (DWORD i = 0; i < threadCount; i++) {
+        if (allThreads[i].ownerPid == dwProcId) {
+            wprintf(L"tid: %-8lu  base priority: %-3ld  delta priority: %ld\n",
+                allThreads[i].tid,
+                allThreads[i].basePriority,
+                allThreads[i].deltaPriority);
+            count++;
+        }
+    }
+
+    wprintf(L"\ntotal: %lu threads\n\n", count);
+
+    free(allThreads);
+    CloseHandle(hProcess);
+}
+
+void ListAllProcesses() {
+    ProcessInfo* allProcesses = NULL;
+    DWORD processCount = 0;
+
+    if (!GetAllProcessInfo(&allProcesses, &processCount)) {
+        wprintf(L"failed to get process info\n");
+        return;
+    }
+
+    wprintf(L"\nrunning processes\n");
+    wprintf(L"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
+    wprintf(L"%-8s  %-8s  %-40s\n", L"pid", L"threads", L"name");
+
+    for (DWORD i = 0; i < processCount; i++) {
+        wprintf(L"%-8lu  %-8lu  %ls\n",
+            allProcesses[i].pid,
+            allProcesses[i].threadCount,
+            allProcesses[i].name);
+    }
+
+    wprintf(L"\ntotal: %lu processes\n\n", processCount);
+    free(allProcesses);
 }
 
 void InspectProc(LPWSTR processName) {
@@ -178,56 +379,25 @@ void InspectProc(LPWSTR processName) {
         return;
     }
 
+    ProcessInfo* allProcesses = NULL;
+    DWORD processCount = 0;
+    GetAllProcessInfo(&allProcesses, &processCount);
+
+    ProcessInfo* procInfo = FindProcessInfo(allProcesses, processCount, dwProcId);
+
     wprintf(L"\n%ls\n", processName);
     wprintf(L"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
 
     wprintf(L"basic\n");
     wprintf(L"  pid                    %lu\n", dwProcId);
 
+    if (procInfo) {
+        wprintf(L"  parent pid             %lu (%ls)\n", procInfo->parentPid, procInfo->parentName);
+        wprintf(L"  base priority          %ld\n", procInfo->basePriority);
+        wprintf(L"  threads                %lu\n", procInfo->threadCount);
+    }
+
     if (hProcess) {
-        HANDLE hProcSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (hProcSnap != INVALID_HANDLE_VALUE) {
-            PROCESSENTRY32 pe32 = { .dwSize = sizeof(PROCESSENTRY32) };
-            WCHAR parentName[MAX_PATH] = L"unknown";
-            DWORD parentPid = 0;
-
-            if (Process32First(hProcSnap, &pe32)) {
-                do {
-                    if (pe32.th32ProcessID == dwProcId) {
-                        parentPid = pe32.th32ParentProcessID;
-                        wprintf(L"  base priority          %ld\n", pe32.pcPriClassBase);
-                        break;
-                    }
-                } while (Process32Next(hProcSnap, &pe32));
-            }
-
-            if (parentPid > 0 && Process32First(hProcSnap, &pe32)) {
-                do {
-                    if (pe32.th32ProcessID == parentPid) {
-                        wcscpy_s(parentName, MAX_PATH, pe32.szExeFile);
-                        break;
-                    }
-                } while (Process32Next(hProcSnap, &pe32));
-            }
-
-            wprintf(L"  parent pid             %lu (%ls)\n", parentPid, parentName);
-            CloseHandle(hProcSnap);
-        }
-
-        HANDLE hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        DWORD threadCount = 0;
-        if (hThreadSnap != INVALID_HANDLE_VALUE) {
-            THREADENTRY32 te = { .dwSize = sizeof(THREADENTRY32) };
-            if (Thread32First(hThreadSnap, &te)) {
-                do {
-                    if (te.th32OwnerProcessID == dwProcId)
-                        threadCount++;
-                } while (Thread32Next(hThreadSnap, &te));
-            }
-            CloseHandle(hThreadSnap);
-        }
-        wprintf(L"  threads                %lu\n", threadCount);
-
         BOOL isElevated = FALSE;
         HANDLE hToken = NULL;
         if (OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) {
@@ -239,6 +409,11 @@ void InspectProc(LPWSTR processName) {
             CloseHandle(hToken);
         }
         wprintf(L"  elevated               %ls\n", isElevated ? L"yes" : L"no");
+
+        DWORD sessionId = 0;
+        if (ProcessIdToSessionId(dwProcId, &sessionId)) {
+            wprintf(L"  session id             %lu\n", sessionId);
+        }
 
         wprintf(L"\nmemory\n");
         PROCESS_MEMORY_COUNTERS_EX pmcEx = { 0 };
@@ -314,19 +489,43 @@ void InspectProc(LPWSTR processName) {
         CloseHandle(hProcess);
     }
 
+    if (allProcesses) free(allProcesses);
     wprintf(L"\n");
 }
 
 int wmain(int argc, LPWSTR argv[]) {
     PrintBanner();
 
-    if (argc < 2) { PrintHelp(argv[0]); return -1; }
+    if (argc < 2) {
+        PrintHelp(argv[0]);
+        return -1;
+    }
 
     if (wcscmp(argv[1], L"-h") == 0 || wcscmp(argv[1], L"--help") == 0)
         PrintHelp(argv[0]);
     else if (wcscmp(argv[1], L"-i") == 0 || wcscmp(argv[1], L"--inspect") == 0) {
-        if (argc < 3) { wprintf(L"\ninspect flag requires a process name\n"); return -1; }
+        if (argc < 3) {
+            wprintf(L"\ninspect flag requires a process name\n");
+            return -1;
+        }
         InspectProc(argv[2]);
+    }
+    else if (wcscmp(argv[1], L"-m") == 0 || wcscmp(argv[1], L"--modules") == 0) {
+        if (argc < 3) {
+            wprintf(L"\nmodules flag requires a process name\n");
+            return -1;
+        }
+        ListModules(argv[2]);
+    }
+    else if (wcscmp(argv[1], L"-t") == 0 || wcscmp(argv[1], L"--threads") == 0) {
+        if (argc < 3) {
+            wprintf(L"\nthreads flag requires a process name\n");
+            return -1;
+        }
+        ListThreads(argv[2]);
+    }
+    else if (wcscmp(argv[1], L"-l") == 0 || wcscmp(argv[1], L"--list") == 0) {
+        ListAllProcesses();
     }
     else {
         wprintf(L"\nunknown option: %ls\n", argv[1]);
